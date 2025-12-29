@@ -113,12 +113,18 @@ export async function createPayment(
   productName: string,
   siteUrl: string
 ): Promise<string> {
-  const gateway = process.env.LDC_GATEWAY || "https://credit.linux.do/epay";
+  let gateway = process.env.LDC_GATEWAY || "https://credit.linux.do/epay";
   const pid = process.env.LDC_PID;
   const secret = process.env.LDC_SECRET;
 
   if (!pid || !secret) {
     throw new Error("支付配置未设置：请在 .env 文件中配置 LDC_PID 和 LDC_SECRET");
+  }
+
+  // 确保网关地址格式正确
+  gateway = gateway.replace(/\/+$/, ""); // 移除末尾斜杠
+  if (!gateway.includes("/epay")) {
+    gateway = gateway + "/epay";
   }
 
   const params: PaymentParams = {
@@ -139,6 +145,13 @@ export async function createPayment(
     sign_type: "MD5",
   } as Record<string, string>);
 
+  // 调试日志
+  console.log("LDC 支付请求:", {
+    gateway,
+    url: `${gateway}/pay/submit.php`,
+    params: { ...params, sign, sign_type: "MD5" },
+  });
+
   // 发起请求，获取跳转 URL
   const response = await fetch(`${gateway}/pay/submit.php`, {
     method: "POST",
@@ -157,17 +170,32 @@ export async function createPayment(
     }
   }
 
-  // 处理错误
+  // 处理错误 - 先获取响应文本以便调试
+  const responseText = await response.text();
+  console.error("LDC 支付 API 响应:", {
+    status: response.status,
+    statusText: response.statusText,
+    headers: Object.fromEntries(response.headers.entries()),
+    body: responseText.slice(0, 500), // 只打印前 500 字符
+  });
+
+  // 尝试解析为 JSON
   try {
-    const error = await response.json();
-    console.error("LDC 支付 API 错误:", error);
+    const error = JSON.parse(responseText);
     throw new Error(error.error_msg || `创建支付订单失败 (HTTP ${response.status})`);
   } catch (e) {
     if (e instanceof Error && e.message.includes("创建支付订单失败")) {
       throw e;
     }
-    console.error("解析支付响应失败:", e);
-    throw new Error(`创建支付订单失败 (HTTP ${response.status})`);
+    // JSON 解析失败，可能是 HTML 错误页面
+    // 检查是否是常见错误
+    if (responseText.includes("签名验证失败")) {
+      throw new Error("签名验证失败，请检查 LDC_SECRET 配置");
+    }
+    if (responseText.includes("不支持的请求类型")) {
+      throw new Error("不支持的请求类型，type 必须为 epay");
+    }
+    throw new Error(`创建支付订单失败 (HTTP ${response.status})，请检查支付配置`);
   }
 }
 
