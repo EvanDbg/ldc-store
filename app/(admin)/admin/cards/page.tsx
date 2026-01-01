@@ -16,6 +16,7 @@ import { CreditCard, Package } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { ImportCardsDialog } from "./import-cards-dialog";
+import { EditCardDialog } from "./edit-card-dialog";
 
 interface CardsPageProps {
   searchParams: Promise<{ product?: string }>;
@@ -169,6 +170,7 @@ export default async function CardsPage({ searchParams }: CardsPageProps) {
                         <TableHead>卡密内容</TableHead>
                         <TableHead className="text-center">状态</TableHead>
                         <TableHead>创建时间</TableHead>
+                        <TableHead className="text-center w-20">操作</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -192,6 +194,13 @@ export default async function CardsPage({ searchParams }: CardsPageProps) {
                             </TableCell>
                             <TableCell className="text-sm text-zinc-500">
                               {new Date(card.createdAt).toLocaleString("zh-CN")}
+                            </TableCell>
+                            <TableCell className="text-center">
+                              <EditCardDialog
+                                cardId={card.id}
+                                currentContent={card.content}
+                                disabled={card.status === "sold"}
+                              />
                             </TableCell>
                           </TableRow>
                         );

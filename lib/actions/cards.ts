@@ -3,7 +3,7 @@
 import { db, cards, products } from "@/lib/db";
 import { eq, and, sql, inArray, desc, asc } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { importCardsSchema, type ImportCardsInput } from "@/lib/validations/card";
+import { importCardsSchema, updateCardSchema, type ImportCardsInput, type UpdateCardInput } from "@/lib/validations/card";
 import { requireAdmin } from "@/lib/auth-utils";
 
 /**
@@ -103,6 +103,68 @@ export async function importCards(input: ImportCardsInput) {
   } catch (error) {
     console.error("导入卡密失败:", error);
     return { success: false, message: "导入卡密失败" };
+  }
+}
+
+/**
+ * 编辑卡密内容
+ */
+export async function updateCard(input: UpdateCardInput) {
+  try {
+    await requireAdmin();
+  } catch {
+    return { success: false, message: "需要管理员权限" };
+  }
+
+  const validationResult = updateCardSchema.safeParse(input);
+  if (!validationResult.success) {
+    return {
+      success: false,
+      message: validationResult.error.issues[0].message,
+    };
+  }
+
+  const { cardId, content } = validationResult.data;
+
+  try {
+    // 查找卡密
+    const card = await db.query.cards.findFirst({
+      where: eq(cards.id, cardId),
+    });
+
+    if (!card) {
+      return { success: false, message: "卡密不存在" };
+    }
+
+    // 只能编辑未售出的卡密
+    if (card.status === "sold") {
+      return { success: false, message: "已售出的卡密不能编辑" };
+    }
+
+    // 检查新内容是否与同商品下其他卡密重复
+    const duplicateCard = await db.query.cards.findFirst({
+      where: and(
+        eq(cards.productId, card.productId),
+        eq(cards.content, content),
+      ),
+    });
+
+    if (duplicateCard && duplicateCard.id !== cardId) {
+      return { success: false, message: "该卡密内容已存在" };
+    }
+
+    // 更新卡密
+    await db
+      .update(cards)
+      .set({ content })
+      .where(eq(cards.id, cardId));
+
+    revalidatePath("/admin/cards");
+
+    return { success: true, message: "卡密更新成功" };
+  } catch (error) {
+    console.error("更新卡密失败:", error);
+    return { success: false, message: "更新卡密失败" };
   }
 }
 
