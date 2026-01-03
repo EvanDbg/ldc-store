@@ -125,9 +125,9 @@ export function ProductCard({
           {/* Stats */}
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
             {salesCount !== undefined && salesCount > 0 && (
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 text-emerald-500">
                 <TrendingUp className="h-3.5 w-3.5" />
-                <span>{salesCount}售</span>
+                <span>已售 {salesCount}</span>
               </div>
             )}
             {!isOutOfStock && stock > 0 && stock <= 10 && (
