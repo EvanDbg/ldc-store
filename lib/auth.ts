@@ -63,15 +63,18 @@ const LinuxDoProvider = {
       ? profile.avatar_template.replace("{size}", "120")
       : undefined;
     
-    // 重要：确保 id 始终是字符串格式的数字
-    const userId = String(profile.id);
-    console.log("[LinuxDoProvider] 生成 userId:", userId);
+    // 重要：Linux DO 的用户 ID（数字）转为字符串
+    // NextAuth v5 会覆盖 id 字段为内部 UUID，所以我们需要用自定义字段 linuxDoId 来保存真正的用户 ID
+    const linuxDoId = String(profile.id);
+    console.log("[LinuxDoProvider] linuxDoId:", linuxDoId);
     
     const result = {
-      id: userId,
+      id: linuxDoId, // NextAuth 可能会覆盖这个，但我们仍然设置它
       name: profile.name || profile.username,
       email: `${profile.username}@linux.do`, // Linux DO 不返回邮箱，使用用户名构造
       image: avatarUrl,
+      // 自定义字段（不会被 NextAuth 覆盖）
+      linuxDoId, // 保存真正的 Linux DO 用户 ID
       username: profile.username,
       trustLevel: profile.trust_level,
       active: profile.active,
@@ -130,17 +133,19 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       console.log("[JWT Callback] 调用, user存在:", !!user, ", account provider:", account?.provider);
       
       if (user) {
+        // 获取自定义字段 linuxDoId（不会被 NextAuth 覆盖）
+        const linuxDoId = (user as { linuxDoId?: string }).linuxDoId;
         console.log("[JWT Callback] user.id:", user.id);
+        console.log("[JWT Callback] user.linuxDoId:", linuxDoId);
         console.log("[JWT Callback] account.providerAccountId:", account?.providerAccountId);
         
-        // 重要：使用 user.id（来自 profile 函数），这是我们控制的稳定 ID
-        // user.id 已经在 profile 函数中设置为 String(profile.id)
-        const userId = user.id;
+        // 重要：使用 linuxDoId 作为稳定的用户 ID
+        // NextAuth v5 会将 user.id 替换为内部 UUID，所以我们使用自定义字段
+        const stableUserId = linuxDoId || account?.providerAccountId || user.id;
         
-        // 同时设置 id 和 sub，确保用户 ID 在 token 刷新时保持一致
-        // sub 是 JWT 标准字段，NextAuth v5 依赖它来识别用户
-        token.id = userId;
-        token.sub = userId;
+        // 设置 token 中的用户 ID（用于后续请求）
+        token.id = stableUserId;
+        token.sub = stableUserId;
         token.role = (user as { role?: string }).role;
         
         // 保存 OAuth 用户的额外信息
