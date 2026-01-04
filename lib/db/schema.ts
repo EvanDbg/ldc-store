@@ -10,7 +10,7 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 
 // ============================================
 // Enums
@@ -23,11 +23,13 @@ export const cardStatusEnum = pgEnum("card_status", [
 ]);
 
 export const orderStatusEnum = pgEnum("order_status", [
-  "pending",   // 待支付
-  "paid",      // 已支付
-  "completed", // 已完成（卡密已发放）
-  "expired",   // 已过期
-  "refunded",  // 已退款
+  "pending",          // 待支付
+  "paid",             // 已支付
+  "completed",        // 已完成（卡密已发放）
+  "expired",          // 已过期
+  "refund_pending",   // 退款审核中
+  "refund_rejected",  // 退款已拒绝
+  "refunded",         // 已退款
 ]);
 
 export const paymentMethodEnum = pgEnum("payment_method", [
@@ -142,6 +144,11 @@ export const orders = pgTable("orders", {
   // 备注
   remark: text("remark"),
   adminRemark: text("admin_remark"), // 管理员备注
+  
+  // 退款相关
+  refundReason: text("refund_reason"), // 退款原因
+  refundRequestedAt: timestamp("refund_requested_at", { withTimezone: true }), // 申请退款时间
+  refundedAt: timestamp("refunded_at", { withTimezone: true }), // 退款完成时间
 }, (table) => [
   uniqueIndex("orders_order_no_idx").on(table.orderNo),
   index("orders_status_idx").on(table.status),
@@ -150,6 +157,7 @@ export const orders = pgTable("orders", {
   index("orders_created_at_idx").on(table.createdAt),
   index("orders_trade_no_idx").on(table.tradeNo),
   index("orders_user_id_idx").on(table.userId),
+  index("orders_refund_status_idx").on(table.status).where(sql`status IN ('refund_pending', 'refund_rejected', 'refunded')`),
 ]);
 
 // ============================================

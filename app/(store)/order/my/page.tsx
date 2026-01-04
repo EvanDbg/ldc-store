@@ -1,12 +1,22 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useTransition } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { getUserOrders } from "@/lib/actions/orders";
+import { getUserOrders, requestRefund, getRefundEnabled } from "@/lib/actions/orders";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import {
   Loader2,
   Package,
@@ -17,6 +27,8 @@ import {
   AlertCircle,
   ChevronRight,
   RefreshCw,
+  RotateCcw,
+  Ban,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -57,6 +69,17 @@ const statusConfig: Record<
     variant: "secondary",
     icon: <XCircle className="h-3 w-3" />,
   },
+  refund_pending: {
+    label: "退款审核中",
+    variant: "outline",
+    icon: <RotateCcw className="h-3 w-3" />,
+    className: "border-amber-500 text-amber-600",
+  },
+  refund_rejected: {
+    label: "退款已拒绝",
+    variant: "secondary",
+    icon: <Ban className="h-3 w-3" />,
+  },
   refunded: {
     label: "已退款",
     variant: "destructive",
@@ -72,6 +95,13 @@ export default function MyOrdersPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [expandedOrder, setExpandedOrder] = useState<string | null>(null);
   const [copiedCard, setCopiedCard] = useState<string | null>(null);
+  
+  // 退款相关状态
+  const [refundDialogOpen, setRefundDialogOpen] = useState(false);
+  const [refundOrderNo, setRefundOrderNo] = useState<string | null>(null);
+  const [refundReason, setRefundReason] = useState("");
+  const [isPending, startTransition] = useTransition();
+  const [refundEnabled, setRefundEnabled] = useState(false);
 
   const user = session?.user as { provider?: string } | undefined;
   const isLoggedIn = user?.provider === "linux-do";
@@ -84,7 +114,14 @@ export default function MyOrdersPage() {
     }
 
     try {
-      const result = await getUserOrders();
+      // 并行获取订单和退款功能状态
+      const [result, isRefundEnabled] = await Promise.all([
+        getUserOrders(),
+        getRefundEnabled(),
+      ]);
+      
+      setRefundEnabled(isRefundEnabled);
+      
       if (result.success) {
         setOrders(result.data as OrderData[]);
       } else {
@@ -135,6 +172,27 @@ export default function MyOrdersPage() {
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
+    });
+  };
+
+  const openRefundDialog = (orderNo: string) => {
+    setRefundOrderNo(orderNo);
+    setRefundReason("");
+    setRefundDialogOpen(true);
+  };
+
+  const handleRefundSubmit = () => {
+    if (!refundOrderNo) return;
+    
+    startTransition(async () => {
+      const result = await requestRefund(refundOrderNo, refundReason);
+      if (result.success) {
+        toast.success(result.message);
+        setRefundDialogOpen(false);
+        loadOrders(true);
+      } else {
+        toast.error(result.message);
+      }
     });
   };
 
@@ -279,6 +337,38 @@ export default function MyOrdersPage() {
                         订单待支付，请尽快完成支付
                       </div>
                     )}
+
+                    {/* Refund Button - 仅当退款功能启用时显示 */}
+                    {refundEnabled && order.status === "completed" && (
+                      <div className="mt-3 flex justify-end">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-xs"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openRefundDialog(order.orderNo);
+                          }}
+                        >
+                          <RotateCcw className="h-3 w-3 mr-1" />
+                          申请退款
+                        </Button>
+                      </div>
+                    )}
+
+                    {/* Refund Pending Notice */}
+                    {order.status === "refund_pending" && (
+                      <div className="mt-3 p-2 rounded bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 text-xs">
+                        退款申请已提交，正在等待审核
+                      </div>
+                    )}
+
+                    {/* Refund Rejected Notice */}
+                    {order.status === "refund_rejected" && (
+                      <div className="mt-3 p-2 rounded bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 text-xs">
+                        退款申请已被拒绝
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -294,6 +384,46 @@ export default function MyOrdersPage() {
           </Button>
         </div>
       )}
+
+      {/* Refund Dialog */}
+      <Dialog open={refundDialogOpen} onOpenChange={setRefundDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>申请退款</DialogTitle>
+            <DialogDescription>
+              请填写退款原因，提交后将由管理员审核
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="refund-reason">退款原因</Label>
+              <Textarea
+                id="refund-reason"
+                placeholder="请详细描述退款原因（至少5个字符）"
+                value={refundReason}
+                onChange={(e) => setRefundReason(e.target.value)}
+                rows={4}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRefundDialogOpen(false)}
+              disabled={isPending}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={handleRefundSubmit}
+              disabled={isPending || refundReason.trim().length < 5}
+            >
+              {isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              提交申请
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

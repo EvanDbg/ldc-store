@@ -5,6 +5,36 @@
 
 import crypto from "crypto";
 
+/**
+ * 检查是否启用退款功能
+ * 仅当配置了 LDC_PROXY_URL 时才启用退款功能
+ * 因为官方的 /api.php 接口受 Cloudflare 保护，无法从 Vercel 直接调用
+ */
+export function isRefundEnabled(): boolean {
+  return !!process.env.LDC_PROXY_URL;
+}
+
+/**
+ * 获取 API 端点 URL
+ * 如果设置了 LDC_PROXY_URL 环境变量，则使用代理地址
+ * 否则使用官方的 /api.php 接口
+ */
+function getApiUrl(): string {
+  const proxyUrl = process.env.LDC_PROXY_URL;
+  if (proxyUrl) {
+    // 使用代理地址
+    return proxyUrl.replace(/\/+$/, ""); // 移除末尾斜杠
+  }
+  
+  // 使用官方接口
+  let gateway = process.env.LDC_GATEWAY || "https://credit.linux.do/epay";
+  gateway = gateway.replace(/\/+$/, "");
+  if (!gateway.includes("/epay")) {
+    gateway = gateway + "/epay";
+  }
+  return `${gateway}/api.php`;
+}
+
 interface PaymentParams {
   pid: string;
   type: string;
@@ -165,11 +195,11 @@ export function createPayment(
 
 /**
  * 查询订单状态
+ * 支持通过 LDC_PROXY_URL 代理请求
  */
 export async function queryPaymentOrder(
   tradeNo: string
 ): Promise<OrderQueryResult> {
-  const gateway = process.env.LDC_GATEWAY || "https://credit.linux.do/epay";
   const pid = process.env.LDC_CLIENT_ID;
   const secret = process.env.LDC_CLIENT_SECRET;
 
@@ -177,6 +207,7 @@ export async function queryPaymentOrder(
     throw new Error("支付配置未设置");
   }
 
+  const apiUrl = getApiUrl();
   const params = new URLSearchParams({
     act: "order",
     pid,
@@ -184,24 +215,40 @@ export async function queryPaymentOrder(
     trade_no: tradeNo,
   });
 
-  const response = await fetch(`${gateway}/api.php?${params}`);
-  const result = await response.json();
+  const url = `${apiUrl}?${params}`;
+  console.log("LDC 订单查询请求:", url.replace(secret, "***"));
 
-  if (result.code !== 1) {
-    throw new Error(result.msg || "查询订单失败");
+  const response = await fetch(url, {
+    headers: {
+      "Accept": "application/json",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    },
+  });
+  
+  const text = await response.text();
+  
+  try {
+    const result = JSON.parse(text);
+    if (result.code !== 1) {
+      throw new Error(result.msg || "查询订单失败");
+    }
+    return result;
+  } catch (e) {
+    console.error("订单查询响应解析失败:", text.substring(0, 200));
+    throw e;
   }
-
-  return result;
 }
 
 /**
  * 退款
+ * 使用 POST 请求调用退款接口
+ * 支持通过 LDC_PROXY_URL 代理请求
+ * 文档: POST /api.php, 支持 application/x-www-form-urlencoded 或 application/json
  */
 export async function refundOrder(
   tradeNo: string,
   money: string
 ): Promise<{ code: number; msg: string }> {
-  const gateway = process.env.LDC_GATEWAY || "https://credit.linux.do/epay";
   const pid = process.env.LDC_CLIENT_ID;
   const secret = process.env.LDC_CLIENT_SECRET;
 
@@ -209,18 +256,51 @@ export async function refundOrder(
     throw new Error("支付配置未设置");
   }
 
-  const response = await fetch(`${gateway}/api.php`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      pid,
-      key: secret,
-      trade_no: tradeNo,
-      money,
-    }),
+  const apiUrl = getApiUrl();
+  const body = new URLSearchParams({
+    pid,
+    key: secret,
+    trade_no: tradeNo,
+    money,
   });
 
-  return response.json();
+  console.log("LDC 退款请求:", apiUrl, "参数:", { pid, trade_no: tradeNo, money });
+
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "application/json",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    },
+    body: body.toString(),
+  });
+
+  // 检查响应内容类型
+  const contentType = response.headers.get("content-type");
+  const text = await response.text();
+
+  console.log("LDC 退款响应状态:", response.status, "类型:", contentType);
+  console.log("LDC 退款响应内容:", text.substring(0, 500));
+
+  // 如果不是 JSON 响应，抛出友好错误
+  if (!contentType?.includes("application/json")) {
+    console.error("退款接口返回非 JSON 响应:", text.substring(0, 500));
+    
+    // 检查是否是 Cloudflare 拦截
+    if (text.includes("Just a moment") || text.includes("cloudflare")) {
+      throw new Error("支付平台被 Cloudflare 拦截，请配置 LDC_PROXY_URL 环境变量使用代理");
+    }
+    
+    throw new Error("支付平台返回格式异常，请检查退款接口配置");
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    console.error("退款接口 JSON 解析失败:", text.substring(0, 500));
+    throw new Error("支付平台响应解析失败");
+  }
 }
 
 export type { PaymentParams, NotifyParams, OrderQueryResult };

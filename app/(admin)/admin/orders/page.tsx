@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { db } from "@/lib/db";
+import { isRefundEnabled } from "@/lib/payment/ldc";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ShoppingCart, Eye, CheckCircle2, Clock } from "lucide-react";
+import { ShoppingCart, Eye, CheckCircle2, Clock, RotateCcw } from "lucide-react";
 import { OrderActions } from "./order-actions";
 import { format } from "date-fns";
 import { zhCN } from "date-fns/locale";
@@ -48,6 +49,14 @@ const statusConfig: Record<string, { label: string; color: string }> = {
     label: "已过期",
     color: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
   },
+  refund_pending: {
+    label: "退款审核中",
+    color: "bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300",
+  },
+  refund_rejected: {
+    label: "退款已拒绝",
+    color: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
+  },
   refunded: {
     label: "已退款",
     color: "bg-rose-100 text-rose-700 dark:bg-rose-900 dark:text-rose-300",
@@ -63,6 +72,7 @@ const paymentMethodLabels: Record<string, string> = {
 
 export default async function OrdersPage() {
   const orders = await getOrders();
+  const refundEnabled = isRefundEnabled();
 
   return (
     <div className="space-y-6">
@@ -104,6 +114,21 @@ export default async function OrdersPage() {
                   {orders.filter((o) => o.status === "completed").length}
                 </p>
                 <p className="text-sm text-zinc-500">已完成</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-orange-100 dark:bg-orange-900">
+                <RotateCcw className="h-5 w-5 text-orange-600" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold">
+                  {orders.filter((o) => o.status === "refund_pending").length}
+                </p>
+                <p className="text-sm text-zinc-500">待审核退款</p>
               </div>
             </div>
           </CardContent>
@@ -175,6 +200,8 @@ export default async function OrdersPage() {
                             orderId={order.id}
                             orderNo={order.orderNo}
                             status={order.status}
+                            refundReason={order.refundReason}
+                            refundEnabled={refundEnabled}
                           />
                         </TableCell>
                       </TableRow>

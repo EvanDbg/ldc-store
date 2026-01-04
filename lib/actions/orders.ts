@@ -5,7 +5,7 @@ import { eq, and, sql, desc, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { headers } from "next/headers";
 import { createOrderSchema, type CreateOrderInput } from "@/lib/validations/order";
-import { createPayment, type PaymentFormData } from "@/lib/payment/ldc";
+import { createPayment, refundOrder, isRefundEnabled, type PaymentFormData } from "@/lib/payment/ldc";
 import { revalidatePath } from "next/cache";
 import { auth } from "@/lib/auth";
 import { requireAdmin } from "@/lib/auth-utils";
@@ -513,5 +513,244 @@ export async function getOrderByNo(orderNo: string) {
       message: "获取订单失败，请稍后重试",
     };
   }
+}
+
+/**
+ * 用户申请退款
+ * 仅已完成的订单可以申请退款
+ * 需要配置 LDC_PROXY_URL 才能使用退款功能
+ */
+export async function requestRefund(
+  orderNo: string,
+  reason: string
+): Promise<{ success: boolean; message: string }> {
+  // 检查退款功能是否启用
+  if (!isRefundEnabled()) {
+    return { success: false, message: "退款功能未启用" };
+  }
+
+  try {
+    const session = await auth();
+    const user = session?.user as { id?: string; provider?: string } | undefined;
+
+    if (!user?.id || user.provider !== "linux-do") {
+      return { success: false, message: "请先登录" };
+    }
+
+    if (!reason || reason.trim().length < 5) {
+      return { success: false, message: "请填写退款原因（至少5个字符）" };
+    }
+
+    // 查找订单并验证所有权
+    const order = await db.query.orders.findFirst({
+      where: and(
+        eq(orders.orderNo, orderNo),
+        eq(orders.userId, user.id)
+      ),
+    });
+
+    if (!order) {
+      return { success: false, message: "订单不存在或无权访问" };
+    }
+
+    // 检查订单状态
+    if (order.status !== "completed") {
+      return { success: false, message: "仅已完成的订单可以申请退款" };
+    }
+
+    // 更新订单状态为退款审核中
+    await db
+      .update(orders)
+      .set({
+        status: "refund_pending",
+        refundReason: reason.trim(),
+        refundRequestedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(orders.id, order.id));
+
+    revalidatePath("/order/my");
+    revalidatePath("/admin/orders");
+
+    return { success: true, message: "退款申请已提交，请等待审核" };
+  } catch (error) {
+    console.error("申请退款失败:", error);
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : "申请退款失败，请稍后重试",
+    };
+  }
+}
+
+/**
+ * 管理员审批退款 - 通过
+ * 调用 LDC 退款接口完成退款
+ * 需要配置 LDC_PROXY_URL 才能使用退款功能
+ */
+export async function approveRefund(
+  orderId: string,
+  adminRemark?: string
+): Promise<{ success: boolean; message: string }> {
+  // 检查退款功能是否启用
+  if (!isRefundEnabled()) {
+    return { success: false, message: "退款功能未启用，请配置 LDC_PROXY_URL" };
+  }
+
+  try {
+    await requireAdmin();
+  } catch {
+    return { success: false, message: "需要管理员权限" };
+  }
+
+  try {
+    // 获取订单信息
+    const order = await db.query.orders.findFirst({
+      where: eq(orders.id, orderId),
+    });
+
+    if (!order) {
+      return { success: false, message: "订单不存在" };
+    }
+
+    if (order.status !== "refund_pending") {
+      return { success: false, message: "该订单不在退款审核中" };
+    }
+
+    if (!order.tradeNo) {
+      return { success: false, message: "订单缺少支付流水号，无法退款" };
+    }
+
+    // 调用 LDC 退款接口
+    const refundResult = await refundOrder(order.tradeNo, order.totalAmount);
+
+    if (refundResult.code !== 1) {
+      console.error("LDC 退款接口返回错误:", refundResult);
+      return { 
+        success: false, 
+        message: `退款失败: ${refundResult.msg || "支付平台返回错误"}` 
+      };
+    }
+
+    // 更新订单状态
+    await db
+      .update(orders)
+      .set({
+        status: "refunded",
+        adminRemark: adminRemark || "退款已通过",
+        refundedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(orders.id, orderId));
+
+    // 将卡密状态改回可用（如果需要回收卡密）
+    // 注意：根据业务需求，退款后卡密可能需要标记为已使用或回收
+    // 这里我们将其改回 available 以便重新销售
+    await db
+      .update(cards)
+      .set({
+        status: "available",
+        orderId: null,
+        soldAt: null,
+      })
+      .where(eq(cards.orderId, orderId));
+
+    revalidatePath("/admin/orders");
+    revalidatePath("/order/my");
+
+    return { success: true, message: "退款成功" };
+  } catch (error) {
+    console.error("审批退款失败:", error);
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : "退款操作失败",
+    };
+  }
+}
+
+/**
+ * 管理员审批退款 - 拒绝
+ */
+export async function rejectRefund(
+  orderId: string,
+  adminRemark?: string
+): Promise<{ success: boolean; message: string }> {
+  try {
+    await requireAdmin();
+  } catch {
+    return { success: false, message: "需要管理员权限" };
+  }
+
+  try {
+    const order = await db.query.orders.findFirst({
+      where: eq(orders.id, orderId),
+    });
+
+    if (!order) {
+      return { success: false, message: "订单不存在" };
+    }
+
+    if (order.status !== "refund_pending") {
+      return { success: false, message: "该订单不在退款审核中" };
+    }
+
+    // 更新订单状态为已拒绝，并恢复为已完成状态
+    await db
+      .update(orders)
+      .set({
+        status: "refund_rejected",
+        adminRemark: adminRemark || "退款申请已拒绝",
+        updatedAt: new Date(),
+      })
+      .where(eq(orders.id, orderId));
+
+    revalidatePath("/admin/orders");
+    revalidatePath("/order/my");
+
+    return { success: true, message: "已拒绝退款申请" };
+  } catch (error) {
+    console.error("拒绝退款失败:", error);
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : "操作失败",
+    };
+  }
+}
+
+/**
+ * 获取退款订单列表（管理员）
+ */
+export async function getRefundOrders() {
+  try {
+    await requireAdmin();
+  } catch {
+    return { success: false, message: "需要管理员权限", data: [] };
+  }
+
+  try {
+    const refundOrders = await db.query.orders.findMany({
+      where: eq(orders.status, "refund_pending"),
+      orderBy: [desc(orders.refundRequestedAt)],
+    });
+
+    return {
+      success: true,
+      data: refundOrders,
+    };
+  } catch (error) {
+    console.error("获取退款订单失败:", error);
+    return {
+      success: false,
+      message: "获取退款订单失败",
+      data: [],
+    };
+  }
+}
+
+/**
+ * 获取退款功能是否启用
+ * 前端根据此状态决定是否显示退款相关按钮
+ */
+export async function getRefundEnabled(): Promise<boolean> {
+  return isRefundEnabled();
 }
 
