@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -30,6 +31,7 @@ export function EditCardDialog({
   disabled = false,
   children,
 }: EditCardDialogProps) {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [content, setContent] = useState(currentContent);
   const [isPending, startTransition] = useTransition();
@@ -55,6 +57,8 @@ export function EditCardDialog({
       if (result.success) {
         toast.success(result.message);
         setOpen(false);
+        // 为什么这样做：卡密内容变更需要刷新服务端列表数据，避免表格仍显示旧值。
+        router.refresh();
       } else {
         toast.error(result.message);
       }
@@ -130,4 +134,3 @@ export function EditCardDialog({
     </Dialog>
   );
 }
-

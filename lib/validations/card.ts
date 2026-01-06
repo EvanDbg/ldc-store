@@ -7,6 +7,12 @@ export const importCardsSchema = z.object({
   delimiter: z.enum(["newline", "comma"]).default("newline"),
 });
 
+// 新增单条卡密验证
+export const createCardSchema = z.object({
+  productId: z.string().uuid("无效的商品ID"),
+  content: z.string().trim().min(1, "卡密内容不能为空").max(1000, "卡密内容过长"),
+});
+
 // 单个卡密操作验证
 export const cardOperationSchema = z.object({
   cardId: z.string().uuid("无效的卡密ID"),
@@ -15,7 +21,7 @@ export const cardOperationSchema = z.object({
 // 编辑卡密验证
 export const updateCardSchema = z.object({
   cardId: z.string().uuid("无效的卡密ID"),
-  content: z.string().min(1, "卡密内容不能为空").max(1000, "卡密内容过长"),
+  content: z.string().trim().min(1, "卡密内容不能为空").max(1000, "卡密内容过长"),
 });
 
 // 批量卡密操作验证
@@ -25,7 +31,7 @@ export const batchCardOperationSchema = z.object({
 });
 
 export type ImportCardsInput = z.infer<typeof importCardsSchema>;
+export type CreateCardInput = z.infer<typeof createCardSchema>;
 export type CardOperationInput = z.infer<typeof cardOperationSchema>;
 export type BatchCardOperationInput = z.infer<typeof batchCardOperationSchema>;
 export type UpdateCardInput = z.infer<typeof updateCardSchema>;
-

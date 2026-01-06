@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -33,6 +34,7 @@ export function ImportCardsDialog({
   productId,
   children,
 }: ImportCardsDialogProps) {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [content, setContent] = useState("");
   const [delimiter, setDelimiter] = useState<"newline" | "comma">("newline");
@@ -59,6 +61,8 @@ export function ImportCardsDialog({
         });
         setContent("");
         setOpen(false);
+        // 为什么这样做：导入会影响库存与列表，需要刷新以立刻看到最新卡密与统计。
+        router.refresh();
       } else {
         toast.error(result.message);
       }
@@ -151,4 +155,3 @@ export function ImportCardsDialog({
     </Dialog>
   );
 }
-

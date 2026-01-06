@@ -1,34 +1,50 @@
 export const dynamic = "force-dynamic";
 
-import { db, products, cards } from "@/lib/db";
-import { eq, sql, desc, asc } from "drizzle-orm";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { CreditCard, Package } from "lucide-react";
+import { redirect } from "next/navigation";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
-import { ImportCardsDialog } from "./import-cards-dialog";
-import { EditCardDialog } from "./edit-card-dialog";
-import { LocalTime } from "@/components/time/local-time";
 
-function toIsoString(value: unknown): string | null {
-  if (!value) return null;
-  if (value instanceof Date) return value.toISOString();
-  if (typeof value === "string") return value;
-  const date = new Date(value as string);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+import { db, products, cards, orders, cardStatusEnum, type CardStatus } from "@/lib/db";
+import { eq, sql, desc, asc, and, ilike, inArray } from "drizzle-orm";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { CreditCard, Package } from "lucide-react";
+import { ImportCardsDialog } from "./import-cards-dialog";
+import { CreateCardDialog } from "./create-card-dialog";
+import { CardsClient } from "./cards-client";
+import { buildAdminCardsHref, DEFAULT_ADMIN_CARDS_PAGE_SIZE } from "./cards-url";
+import type { AdminCardListItem } from "./cards-table";
+
+function normalizePage(value?: string): number {
+  return Math.max(1, Number.parseInt(value || "1", 10) || 1);
+}
+
+function normalizePageSize(value?: string): number {
+  const parsed = Number.parseInt(value || String(DEFAULT_ADMIN_CARDS_PAGE_SIZE), 10);
+  const safe = Number.isFinite(parsed) ? parsed : DEFAULT_ADMIN_CARDS_PAGE_SIZE;
+  return Math.min(200, Math.max(1, safe));
+}
+
+function normalizeEnumValue<T extends readonly string[]>(
+  value: string | undefined,
+  allowed: T
+): T[number] | undefined {
+  if (!value) return undefined;
+  return allowed.includes(value) ? (value as T[number]) : undefined;
+}
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
 interface CardsPageProps {
-  searchParams: Promise<{ product?: string }>;
+  searchParams: Promise<{
+    product?: string;
+    q?: string;
+    status?: string;
+    orderNo?: string;
+    page?: string;
+    pageSize?: string;
+  }>;
 }
 
 async function getProductsWithStock() {
@@ -58,43 +74,142 @@ async function getProductsWithStock() {
   }));
 }
 
-async function getCardsByProduct(productId: string) {
-  return db.query.cards.findMany({
-    where: eq(cards.productId, productId),
-    orderBy: [asc(cards.status), desc(cards.createdAt)],
-    limit: 100,
-  });
+async function getCardsPage(
+  productId: string,
+  options: {
+    q?: string;
+    status?: CardStatus;
+    orderNo?: string;
+    page: number;
+    pageSize: number;
+  }
+): Promise<{ items: AdminCardListItem[]; total: number }> {
+  const conditions = [eq(cards.productId, productId)];
+
+  if (options.status) {
+    conditions.push(eq(cards.status, options.status));
+  }
+
+  if (options.q) {
+    const pattern = `%${escapeLikePattern(options.q)}%`;
+    conditions.push(ilike(cards.content, pattern));
+  }
+
+  if (options.orderNo) {
+    const pattern = `%${escapeLikePattern(options.orderNo)}%`;
+    const matchedOrders = await db
+      .select({ id: orders.id })
+      .from(orders)
+      .where(ilike(orders.orderNo, pattern))
+      .limit(200);
+
+    const orderIds = matchedOrders.map((o) => o.id);
+    if (orderIds.length === 0) {
+      return { items: [], total: 0 };
+    }
+
+    conditions.push(inArray(cards.orderId, orderIds));
+  }
+
+  const where = and(...conditions);
+  const offset = (options.page - 1) * options.pageSize;
+
+  const [rows, countRows] = await Promise.all([
+    db.query.cards.findMany({
+      where,
+      columns: {
+        id: true,
+        content: true,
+        status: true,
+        createdAt: true,
+        orderId: true,
+      },
+      with: {
+        order: {
+          columns: {
+            id: true,
+            orderNo: true,
+          },
+        },
+      },
+      orderBy: [asc(cards.status), desc(cards.createdAt)],
+      limit: options.pageSize,
+      offset,
+    }),
+    db.select({ count: sql<number>`count(*)::int` }).from(cards).where(where),
+  ]);
+
+  const total = countRows[0]?.count ?? 0;
+
+  const items: AdminCardListItem[] = rows.map((card) => ({
+    ...card,
+    content: card.status === "sold" ? `${card.content.slice(0, 10)}***` : card.content,
+    contentMasked: card.status === "sold",
+  }));
+
+  return { items, total };
 }
 
-const statusConfig: Record<string, { label: string; color: string }> = {
+const stockBadgeConfig: Record<CardStatus, { label: string; className: string }> = {
   available: {
     label: "可用",
-    color: "bg-emerald-100 text-emerald-700",
+    className: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200",
   },
   locked: {
     label: "锁定",
-    color: "bg-amber-100 text-amber-700",
+    className: "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-200",
   },
   sold: {
     label: "已售",
-    color: "bg-zinc-100 text-zinc-700",
+    className: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200",
   },
 };
 
 export default async function CardsPage({ searchParams }: CardsPageProps) {
-  const { product: selectedProductId } = await searchParams;
+  const params = await searchParams;
+  const selectedProductId = params.product;
+
+  const q = (params.q || "").trim();
+  const orderNo = (params.orderNo || "").trim();
+  const status = normalizeEnumValue(params.status, cardStatusEnum.enumValues) as
+    | CardStatus
+    | undefined;
+  const page = normalizePage(params.page);
+  const pageSize = normalizePageSize(params.pageSize);
+
   const productsWithStock = await getProductsWithStock();
-  const cardsList = selectedProductId
-    ? await getCardsByProduct(selectedProductId)
-    : [];
 
   const selectedProduct = selectedProductId
     ? productsWithStock.find((p) => p.id === selectedProductId)
     : null;
 
+  const cardsResult = selectedProductId
+    ? await getCardsPage(selectedProductId, {
+        q: q || undefined,
+        status,
+        orderNo: orderNo || undefined,
+        page,
+        pageSize,
+      })
+    : { items: [], total: 0 };
+
+  const totalPages = Math.max(1, Math.ceil(cardsResult.total / pageSize));
+  if (selectedProductId && cardsResult.total > 0 && page > totalPages) {
+    redirect(
+      buildAdminCardsHref({
+        productId: selectedProductId,
+        q: q || undefined,
+        status,
+        orderNo: orderNo || undefined,
+        page: totalPages,
+        pageSize,
+      })
+    );
+  }
+  const safePage = Math.min(page, totalPages);
+
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">
@@ -104,13 +219,9 @@ export default async function CardsPage({ searchParams }: CardsPageProps) {
             管理商品库存和卡密
           </p>
         </div>
-        {selectedProductId && (
-          <ImportCardsDialog productId={selectedProductId} />
-        )}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Product List */}
         <Card className="lg:col-span-1">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -122,7 +233,7 @@ export default async function CardsPage({ searchParams }: CardsPageProps) {
             {productsWithStock.map((product) => (
               <Link
                 key={product.id}
-                href={`/admin/cards?product=${product.id}`}
+                href={buildAdminCardsHref({ productId: product.id })}
                 className={`block rounded-lg border p-3 transition-colors ${
                   selectedProductId === product.id
                     ? "border-violet-500 bg-violet-50 dark:bg-violet-950"
@@ -161,71 +272,45 @@ export default async function CardsPage({ searchParams }: CardsPageProps) {
           </CardContent>
         </Card>
 
-        {/* Cards List */}
         <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <CreditCard className="h-5 w-5" />
               {selectedProduct ? `${selectedProduct.name} 的卡密` : "卡密列表"}
             </CardTitle>
+            {selectedProduct ? (
+              <CardDescription className="flex flex-wrap gap-2">
+                <Badge className={stockBadgeConfig.available.className}>
+                  {stockBadgeConfig.available.label} {selectedProduct.stockStats.available}
+                </Badge>
+                <Badge className={stockBadgeConfig.locked.className}>
+                  {stockBadgeConfig.locked.label} {selectedProduct.stockStats.locked}
+                </Badge>
+                <Badge className={stockBadgeConfig.sold.className}>
+                  {stockBadgeConfig.sold.label} {selectedProduct.stockStats.sold}
+                </Badge>
+              </CardDescription>
+            ) : null}
+            {selectedProductId ? (
+              <CardAction className="flex items-center gap-2">
+                <CreateCardDialog productId={selectedProductId} />
+                <ImportCardsDialog productId={selectedProductId} />
+              </CardAction>
+            ) : null}
           </CardHeader>
           <CardContent>
             {selectedProductId ? (
-              cardsList.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>卡密内容</TableHead>
-                        <TableHead className="text-center">状态</TableHead>
-                        <TableHead>创建时间</TableHead>
-                        <TableHead className="text-center w-20">操作</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {cardsList.map((card) => {
-                        const status = statusConfig[card.status];
-                        return (
-                          <TableRow key={card.id}>
-                            <TableCell className="font-mono text-sm max-w-[300px] truncate">
-                              {card.status === "sold" ? (
-                                <span className="text-zinc-400">
-                                  {card.content.slice(0, 10)}***
-                                </span>
-                              ) : (
-                                card.content
-                              )}
-                            </TableCell>
-                            <TableCell className="text-center">
-                              <Badge className={status.color}>
-                                {status.label}
-                              </Badge>
-                            </TableCell>
-                            <TableCell className="text-sm text-zinc-500">
-                              <LocalTime value={toIsoString(card.createdAt)} />
-                            </TableCell>
-                            <TableCell className="text-center">
-                              <EditCardDialog
-                                cardId={card.id}
-                                currentContent={card.content}
-                                disabled={card.status === "sold"}
-                              />
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                </div>
-              ) : (
-                <div className="py-12 text-center">
-                  <CreditCard className="mx-auto h-12 w-12 text-zinc-300" />
-                  <p className="mt-4 text-zinc-500">该商品暂无卡密</p>
-                  <ImportCardsDialog productId={selectedProductId}>
-                    <Button className="mt-4">导入卡密</Button>
-                  </ImportCardsDialog>
-                </div>
-              )
+              <CardsClient
+                productId={selectedProductId}
+                items={cardsResult.items}
+                total={cardsResult.total}
+                page={safePage}
+                pageSize={pageSize}
+                totalPages={totalPages}
+                q={q}
+                status={status}
+                orderNo={orderNo}
+              />
             ) : (
               <div className="py-12 text-center">
                 <CreditCard className="mx-auto h-12 w-12 text-zinc-300" />
@@ -238,4 +323,3 @@ export default async function CardsPage({ searchParams }: CardsPageProps) {
     </div>
   );
 }
-

@@ -1,8 +1,15 @@
 "use server";
 
 import { db, cards, products } from "@/lib/db";
-import { eq, and, sql, inArray, desc, asc } from "drizzle-orm";
-import { importCardsSchema, updateCardSchema, type ImportCardsInput, type UpdateCardInput } from "@/lib/validations/card";
+import { eq, and, sql, inArray, desc, asc, isNull } from "drizzle-orm";
+import {
+  importCardsSchema,
+  createCardSchema,
+  updateCardSchema,
+  type ImportCardsInput,
+  type CreateCardInput,
+  type UpdateCardInput,
+} from "@/lib/validations/card";
 import { requireAdmin } from "@/lib/auth-utils";
 import { revalidateCardCache } from "@/lib/cache";
 
@@ -105,6 +112,69 @@ export async function importCards(input: ImportCardsInput) {
 }
 
 /**
+ * 新增单条卡密
+ */
+export async function createCard(input: CreateCardInput) {
+  try {
+    await requireAdmin();
+  } catch {
+    return { success: false, message: "需要管理员权限" };
+  }
+
+  const validationResult = createCardSchema.safeParse(input);
+  if (!validationResult.success) {
+    return {
+      success: false,
+      message: validationResult.error.issues[0].message,
+    };
+  }
+
+  const { productId, content } = validationResult.data;
+
+  // 检查商品是否存在
+  const product = await db.query.products.findFirst({
+    where: eq(products.id, productId),
+    columns: { id: true },
+  });
+
+  if (!product) {
+    return { success: false, message: "商品不存在" };
+  }
+
+  try {
+    // 为什么这样做：卡密属于库存，一旦重复会导致“卖出重复内容”，必须在写入前做强校验。
+    const duplicateCard = await db.query.cards.findFirst({
+      where: and(eq(cards.productId, productId), eq(cards.content, content)),
+      columns: { id: true },
+    });
+
+    if (duplicateCard) {
+      return { success: false, message: "该卡密内容已存在" };
+    }
+
+    const [created] = await db
+      .insert(cards)
+      .values({
+        productId,
+        content,
+        status: "available",
+      })
+      .returning({ id: cards.id });
+
+    await revalidateCardCache();
+
+    return {
+      success: true,
+      message: "新增卡密成功",
+      cardId: created?.id,
+    };
+  } catch (error) {
+    console.error("新增卡密失败:", error);
+    return { success: false, message: "新增卡密失败" };
+  }
+}
+
+/**
  * 编辑卡密内容
  */
 export async function updateCard(input: UpdateCardInput) {
@@ -134,9 +204,9 @@ export async function updateCard(input: UpdateCardInput) {
       return { success: false, message: "卡密不存在" };
     }
 
-    // 只能编辑未售出的卡密
-    if (card.status === "sold") {
-      return { success: false, message: "已售出的卡密不能编辑" };
+    // 为什么这样做：locked/sold 卡密已经与订单强绑定，编辑会影响履约与审计；强制要求先“重置锁定”或去订单详情处理。
+    if (card.status !== "available" || card.orderId) {
+      return { success: false, message: "仅可编辑未锁定且未售出的可用卡密" };
     }
 
     // 检查新内容是否与同商品下其他卡密重复
@@ -234,7 +304,8 @@ export async function deleteCards(cardIds: string[]) {
       .where(
         and(
           inArray(cards.id, cardIds),
-          eq(cards.status, "available")
+          eq(cards.status, "available"),
+          isNull(cards.orderId)
         )
       )
       .returning({ id: cards.id });
@@ -371,4 +442,3 @@ export async function cleanDuplicateCards(productId: string) {
     return { success: false, message: "清理失败" };
   }
 }
-
