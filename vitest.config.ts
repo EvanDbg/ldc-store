@@ -16,6 +16,13 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],
+      // 先用“当前覆盖率基线”卡住回退；随着测试补齐可逐步上调。
+      thresholds: {
+        lines: 9,
+        statements: 9,
+        branches: 65,
+        functions: 50,
+      },
       exclude: [
         "**/node_modules/**",
         "**/.next/**",
@@ -26,4 +33,3 @@ export default defineConfig({
     },
   },
 });
-
